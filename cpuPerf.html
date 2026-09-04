@@ -1,0 +1,689 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hardwareConcurrency / cpuPerformance coherence</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa;
+    --surface: #fff;
+    --ink: #1b1b1a;
+    --muted: #6b6b68;
+    --line: #e4e4e1;
+    --ok: #1a7f37;  --ok-bg: #eaf6ed;
+    --bad: #b42318; --bad-bg: #fdecea;
+    --warn: #a15c07; --warn-bg: #fdf3e3;
+    --info: #4a5568; --info-bg: #eef0f3;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --surface: #1d1f23; --ink: #e8e8e6; --muted: #9a9a96;
+      --line: #2c2f34;
+      --ok-bg: #12281a; --bad-bg: #2c1512; --warn-bg: #2a1f0d; --info-bg: #212429;
+      --ok: #4ac26b; --bad: #f2705f; --warn: #e0a038; --info: #a3aab6;
+    }
+  }
+
+  * { box-sizing: border-box }
+  body {
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink); background: var(--bg);
+    margin: 0 auto; padding: 2.5rem 1.5rem 4rem; max-width: 74rem;
+  }
+  h1 { font-size: 1.3rem; font-weight: 650; margin: 0 0 .35rem; letter-spacing: -.01em }
+  h1 code { font-size: .95em; font-weight: 650; background: none; padding: 0 }
+  .sub { color: var(--muted); margin: 0 0 1.75rem; max-width: 46rem }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .88em; background: color-mix(in srgb, var(--muted) 12%, transparent);
+    padding: .1em .35em; border-radius: 4px;
+  }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 1rem 1.15rem; margin-bottom: 1.1rem;
+  }
+  .card > h2 {
+    font-size: .78rem; font-weight: 650; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); margin: 0 0 .8rem;
+  }
+
+  #verdict {
+    display: flex; align-items: flex-start; gap: .6rem;
+    font-size: 1.05rem; font-weight: 620; line-height: 1.45;
+    padding: .9rem 1.1rem; border-radius: var(--radius);
+    border: 1px solid transparent; margin-bottom: 1.1rem;
+  }
+  #verdict::before {
+    content: ''; flex: none; width: .6rem; height: .6rem; margin-top: .45rem;
+    border-radius: 50%; background: currentColor;
+  }
+  #verdict.ok   { color: var(--ok);   background: var(--ok-bg);
+                  border-color: color-mix(in srgb, var(--ok) 25%, transparent) }
+  #verdict.bad  { color: var(--bad);  background: var(--bad-bg);
+                  border-color: color-mix(in srgb, var(--bad) 25%, transparent) }
+  #verdict.warn { color: var(--warn); background: var(--warn-bg);
+                  border-color: color-mix(in srgb, var(--warn) 25%, transparent) }
+  #verdict.info { color: var(--info); background: var(--info-bg);
+                  border-color: color-mix(in srgb, var(--info) 22%, transparent) }
+
+  table { border-collapse: collapse; width: 100% }
+  th, td { text-align: left; padding: .55rem .2rem; vertical-align: top;
+           border-bottom: 1px solid var(--line) }
+  tr:last-child th, tr:last-child td { border-bottom: 0 }
+  th { width: 14rem; font-weight: 500; color: var(--muted); padding-right: 1rem }
+  .note { color: var(--muted); font-size: .92em; margin-top: .2rem }
+  ul { margin: .45rem 0 .2rem; padding-left: 1.1rem }
+  li { margin-bottom: .5rem }
+  li:last-child { margin-bottom: 0 }
+  s { color: var(--muted); text-decoration-thickness: 1px }
+
+  #bench > label { display: grid; grid-template-columns: 11.5rem 1fr 8.5rem;
+                   align-items: center; gap: 1rem; margin: .5rem 0 }
+  #bench > label > span { color: var(--muted); font-size: .93em }
+  #bench output { font-family: ui-monospace, monospace; font-size: .88em;
+                  color: var(--ink) }
+  #bench input[type=range] { width: 100%; accent-color: var(--info) }
+  #bench.simulated input[type=range] { accent-color: var(--warn) }
+  #bench.simulated { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)) }
+  #state { font-weight: 400; text-transform: none; letter-spacing: 0 }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+             margin-top: .9rem; padding-top: .9rem; border-top: 1px solid var(--line) }
+  button {
+    font: inherit; font-size: .9rem; color: var(--ink);
+    padding: .35rem .8rem; border-radius: 8px;
+    border: 1px solid var(--line); background: transparent; cursor: pointer;
+  }
+  #real { margin-right: auto }
+  button:hover { background: color-mix(in srgb, var(--muted) 10%, transparent) }
+  button:active { transform: translateY(1px) }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 19rem; gap: 1.1rem;
+            align-items: start }
+  #presets { position: sticky; top: 1.1rem; padding: .9rem 0 .9rem }
+  #presets h2 { padding: 0 1rem }
+  #presets .group {
+    font-size: .72rem; font-weight: 650; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted);
+    padding: .7rem 1rem .25rem; border-top: 1px solid var(--line); margin-top: .5rem;
+  }
+  #presets .group:first-of-type { border-top: 0; margin-top: 0; padding-top: 0 }
+  #presets .item {
+    display: flex; align-items: flex-start; gap: .5rem; width: 100%; line-height: 1.4;
+    text-align: left; font: inherit; font-size: .88rem; color: var(--ink);
+    background: none; border: 0; border-radius: 0; padding: .3rem 1rem; cursor: pointer;
+  }
+  #presets .item:hover { background: color-mix(in srgb, var(--muted) 10%, transparent) }
+  #presets .item.on { background: color-mix(in srgb, var(--info) 14%, transparent);
+                      box-shadow: inset 2px 0 0 var(--info) }
+  #presets .item .pair {
+    margin-left: auto; flex: none; font-family: ui-monospace, monospace;
+    font-size: .82rem; color: var(--muted); padding-left: .3rem;
+  }
+  #presets .item .dot { flex: none; width: .45rem; height: .45rem; border-radius: 50%;
+                        background: var(--muted); margin-top: .42rem }
+  #presets .item.ok .dot { background: var(--ok) }
+  #presets .item.warn .dot { background: var(--warn) }
+  #presets .item.bad .dot { background: var(--bad) }
+  #show {
+    margin-left: .4rem; border: 0; background: none; padding: .35rem .1rem;
+    color: var(--info); text-decoration: none;
+  }
+  #show span {
+    text-decoration: underline; text-underline-offset: 3px;
+    text-decoration-color: color-mix(in srgb, var(--info) 45%, transparent);
+  }
+  #show:hover { background: none }
+  #show:hover span { text-decoration-color: currentColor }
+  #show::after { content: '→'; margin-left: .4rem; display: inline-block }
+  #show.open::after { content: '↑' }
+
+  #discriminating td.pair { white-space: nowrap; font-family: ui-monospace, monospace;
+                            width: 6rem; font-size: .9em }
+  #discriminating tr.clickable { cursor: pointer }
+  #discriminating tr.clickable:hover td {
+    background: color-mix(in srgb, var(--muted) 8%, transparent) }
+  #discriminating th { width: auto; white-space: nowrap }
+  #discriminating th:first-child { width: 7rem }
+
+  @media (max-width: 68rem) {
+    body { max-width: 46rem }
+    .layout { grid-template-columns: minmax(0, 1fr) }
+    #presets { position: static }
+  }
+
+  @media (max-width: 44rem) {
+    body { padding: 1.5rem 1rem 3rem }
+    th { width: auto; display: block; padding-bottom: 0; border-bottom: 0 }
+    td { display: block; padding-top: .15rem }
+    #discriminating td.pair { width: auto }
+    #discriminating th, #discriminating td { display: table-cell }
+    #bench > label { grid-template-columns: 1fr; gap: .25rem }
+    #bench > label > span { font-size: .88em }
+    #bench output { text-align: left }
+    .actions { flex-direction: column; align-items: stretch }
+    #real { margin-right: 0 }
+    #show { text-align: left }
+  }
+</style>
+
+<h1><code>hardwareConcurrency</code> / <code>cpuPerformance</code> coherence</h1>
+<p class="sub">Chromium 152 exposes <code>navigator.cpuPerformance</code>, a tier
+from 1 to 4 computed by the browser process from the real CPU. A browser that
+reports a different core count without touching the tier contradicts itself.
+This page says whether the pair is reachable at all, and what it gives away
+about the machine.</p>
+
+<div class="layout">
+<main>
+<div id="bench" class="card">
+  <h2>Test bench <span id="state"></span></h2>
+  <label><span>hardwareConcurrency</span>
+    <input type="range" id="sc" min="1" max="64" step="1">
+    <output id="oc"></output></label>
+  <label><span>cpuPerformance</span>
+    <input type="range" id="sp" min="0" max="4" step="1">
+    <output id="op"></output></label>
+  <div class="actions">
+    <button id="real">Back to real values</button>
+    <button id="show"><span>Show discriminating pairs</span></button>
+  </div>
+</div>
+
+<div id="verdict">…</div>
+<div class="card"><table id="out"></table></div>
+
+<div id="discriminating" class="card" hidden></div>
+</main>
+
+<aside id="presets" class="card">
+  <h2>Presets</h2>
+</aside>
+</div>
+
+<script>
+
+function tierFromCores(n) {
+  if (n >= 1 && n <= 2) return 1;
+  if (n >= 3 && n <= 4) return 2;
+  if (n >= 5 && n <= 12) return 3;
+  if (n >= 13) return 4;
+  return 0;
+}
+
+const FAMILIES = [
+  { cores: c => c === 2, tier: 1, who: 'AMD K8/K10 and mobile Trinity',
+    examples: 'Athlon 64, Athlon II, Athlon X2, Phenom II, Sempron X2, Turion II/X2, A4/E2-3xxx (Llano), A4/A6-4xxxM (Trinity)' },
+  { cores: c => c === 2, tier: 1, who: 'AMD Bobcat and Jaguar',
+    examples: 'C-xx, E-xxx, E1/E2-xxxx, T-xx, Z-xx, A4-1xxx, GX-2xx, Sempron 2650' },
+  { cores: c => c === 2, tier: 1, who: 'AMD Stoney Ridge 6 W',
+    examples: 'A4-9120C, A4-9120e' },
+  { cores: c => c >= 2 && c <= 4, tier: 1, who: 'Intel Atom Bonnell/Saltwell/Silvermont/Airmont',
+    examples: 'Atom N2xx, Z5xx, D5xx, N4xx/N5xx, E6xx, Z6xx, N2xxx, Z2xxx, J1xxx, N28xx, Z37xx, x5/x7-Zxxxx' },
+  { cores: c => c === 2, tier: 1, who: 'Intel Atom Goldmont',
+    examples: 'Apollo Lake (Celeron N3350, Pentium J4205), Denverton' },
+  { cores: c => c === 2, tier: 1, who: 'Intel Core 2 (Merom/Penryn), mobile Nehalem/Westmere',
+    examples: 'Core 2 Duo, Celeron/Pentium of the same generations, Arrandale' },
+  { cores: c => c === 2, tier: 1, who: 'Intel low-end mobile Sandy/Ivy Bridge',
+    examples: 'Celeron 7xx/8xx/B7xx/B8xx/1xxx, Pentium 9xx/B9xx/2xxx/A1xxx' },
+  { cores: c => c <= 2, tier: 1, who: 'a CPU from a vendor with no rules of its own',
+    examples: 'only AMD and Intel have their own lists. Apple, MediaTek, Microsoft, Qualcomm/Snapdragon, Samsung and any unrecognised name fall through to the generic case, which returns the low tier at two processors or fewer' },
+  { cores: c => c === 4, tier: 3, who: 'AMD Ryzen with 4 logical processors, Zen or newer',
+    examples: 'Ryzen 3/5 at 4 threads, excluding Ryzen 3 Pro 2100GE, 3 Pro 3050GE, 3 2200U, 3 3200U, 3 3250U/C, Embedded R1xxx and R2312' },
+  { cores: c => c === 4, tier: 3, who: 'Intel Gracemont (Alder Lake-N)',
+    examples: 'N95, N97, N100, N200, N305, Atom x7425E' },
+  { cores: c => c >= 8 && c <= 10, tier: 4, who: 'Apple M', needsAppleGpu: true,
+    examples: 'the rule is <code>^M\\d+\\b</code>, so any model name starting with M and a '
+      + 'number once the “Apple” prefix is stripped — M1 through M4 and whatever comes next, '
+      + 'Pro/Max/Ultra variants included' },
+  { cores: c => c >= 8 && c <= 10, tier: 4, who: 'Intel Core Ultra (Meteor Lake or newer)',
+    examples: 'the rule is <code>^Core Ultra\\b</code>, with no digit list: every Core Ultra '
+      + 'matches, series 1 and 2 alike',
+    perCount: {
+      8: 'At exactly 8, this is Lunar Lake (Core Ultra 200V): 4 P-cores + 4 LP-E-cores with no '
+         + 'Hyper-Threading, so 8 cores and 8 threads. The whole family caps there, the Core '
+         + 'Ultra 9 288V included — the SKU digit says nothing about the count.',
+      9: 'No Core Ultra ships 9 logical processors. On bare metal this count does not occur; '
+         + 'it points to a VM or a cgroup-limited container on a Core Ultra host.',
+      10: 'At exactly 10, the only part is Meteor Lake-U: Core Ultra 5 115U, 2 P + 4 E + 2 LP-E '
+          + '= 8 cores and 10 threads. That is a single SKU, so this pair is the most telling of '
+          + 'the three.',
+    } },
+];
+
+function defaultModelTier(n) {
+  if (n <= 0) return 0;
+  if (n <= 1) return 1;
+  if (n <= 4) return 2;
+  if (n <= 10) return 3;
+  return 4;
+}
+
+function analyse(n) {
+  const reachable = new Map();
+  const add = (t, reason) => {
+    if (!reachable.has(t)) reachable.set(t, []);
+    reachable.get(t).push(reason);
+  };
+  add(tierFromCores(n), 'synchronous pass, processor count alone');
+  add(defaultModelTier(n), 'by-model pass, no particular family');
+  for (const f of FAMILIES) {
+    if (f.cores(n)) add(f.tier, f);
+  }
+  return reachable;
+}
+
+function esc(x) {
+  return String(x).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+}
+
+function row(key, value) {
+  const tr = document.createElement('tr');
+  const th = document.createElement('th'); th.textContent = key;
+  const td = document.createElement('td');
+  if (value instanceof Node) td.appendChild(value); else td.innerHTML = value;
+  tr.append(th, td); document.getElementById('out').appendChild(tr);
+}
+
+const NAMES = { 0: 'unknown', 1: 'low', 2: 'mid', 3: 'high', 4: 'ultra' };
+
+function webglRenderer() {
+  let cv, gl = null;
+  try {
+    cv = document.createElement('canvas');
+    gl = cv.getContext('webgl2') || cv.getContext('webgl');
+  } catch (e) { return { ok: false, why: 'context creation threw' }; }
+  if (!gl) return { ok: false, why: 'no WebGL context' };
+  let s = '';
+  try {
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    if (ext) s = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '';
+    if (!s) s = gl.getParameter(gl.RENDERER) || '';
+  } catch (e) { return { ok: false, why: 'renderer query threw' }; }
+  try { gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch (e) {}
+  if (!s) return { ok: false, why: 'renderer string empty or masked' };
+  if (/swiftshader|llvmpipe|softpipe|software|Google, Vulkan/i.test(s)) {
+    return { ok: false, why: 'software renderer', text: s };
+  }
+  return { ok: true, text: s, apple: /\bApple\b/i.test(s) };
+}
+const GPU = (() => { try { return webglRenderer(); } catch (e) { return { ok: false, why: 'threw' }; } })();
+
+const SECURE = location.protocol === 'https:'
+  || ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+
+const CHROME_MIN_CPU_PERF = 152;
+const CHROMIUM = (() => {
+  if (navigator.userAgentData) return true;
+  const ua = navigator.userAgent || '';
+  if (/\bGecko\/|\bFirefox\//.test(ua)) return false;
+  return /\bChrom(?:e|ium)\/\d/.test(ua);
+})();
+
+function chromiumVersion() {
+  let v = 0;
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  for (const b of brands) {
+    if (/Chromium|Google Chrome/i.test(b.brand)) v = Math.max(v, parseInt(b.version, 10) || 0);
+  }
+  const m = /Chrom(?:e|ium)\/(\d+)/.exec(navigator.userAgent || '');
+  if (m) v = Math.max(v, parseInt(m[1], 10));
+  return v || null;
+}
+
+const PRESETS = [
+  { group: 'Real machines, measured', items: [
+    { label: 'Intel Core Ultra 9 288V — Lunar Lake', c: 8, t: 4 },
+    { label: 'Intel Core Ultra 5 115U — Meteor Lake-U', c: 10, t: 4 },
+    { label: 'Apple M3 — 8 cores', c: 8, t: 4 },
+    { label: 'Intel N100 — Alder Lake-N', c: 4, t: 3 },
+    { label: 'AMD Ryzen 3 3200G — 4 threads', c: 4, t: 3 },
+    { label: 'AMD Ryzen 3 3200U — 2 threads, excluded from the Ryzen rule', c: 2, t: 2 },
+    { label: 'Intel Atom N2600 — Saltwell', c: 4, t: 1 },
+    { label: 'Intel Core i7-8700K — Coffee Lake', c: 12, t: 4 },
+    { label: 'AMD Ryzen 7 9800X3D — Zen 5', c: 16, t: 4 },
+  ] },
+  { group: 'Spoofed, tier left untouched', items: [
+    { label: 'claims 4 cores on a 16-thread host', c: 4, t: 4 },
+    { label: 'claims 2 cores on a 16-thread host', c: 2, t: 4 },
+    { label: 'claims 16 cores on a 6-thread host', c: 16, t: 3 },
+  ] },
+];
+
+function tierClassFor(c, t) {
+  const reachable = analyse(c);
+  if (!reachable.has(t)) return 'bad';
+  const reasons = reachable.get(t);
+  const fams = reasons.filter(r => typeof r !== 'string');
+  return (fams.length && !reasons.some(r => typeof r === 'string')) ? 'warn' : 'ok';
+}
+
+function fillPresets(host, onPick) {
+  for (const g of PRESETS) {
+    const h = document.createElement('div');
+    h.className = 'group'; h.textContent = g.group;
+    host.appendChild(h);
+    for (const it of g.items) {
+      const b = document.createElement('button');
+      b.className = 'item ' + tierClassFor(it.c, it.t);
+      b.dataset.c = it.c; b.dataset.t = it.t;
+      b.innerHTML = '<span class="dot"></span><span>' + esc(it.label) + '</span>'
+        + `<span class="pair">${it.c} / ${it.t}</span>`;
+      b.addEventListener('click', function () {
+        host.querySelectorAll('.item.on').forEach(x => x.classList.remove('on'));
+        b.classList.add('on');
+        onPick(it.c, it.t);
+      });
+      host.appendChild(b);
+    }
+  }
+}
+
+function discriminatingPairs(maxCores) {
+  const found = [];
+  for (let c = 1; c <= maxCores; c++) {
+    const reachable = analyse(c);
+    for (const [t, reasons] of reachable) {
+      const fams = reasons.filter(r => typeof r !== 'string');
+      if (!fams.length || reasons.some(r => typeof r === 'string')) continue;
+      found.push({ cores: c, tier: t, families: fams });
+    }
+  }
+  return found;
+}
+
+function renderDiscriminating() {
+  const host = document.getElementById('discriminating');
+  const pairs = discriminatingPairs(64);
+  let html = '<h2>Pairs where the CPU model is the only explanation</h2>'
+    + '<p class="note">For every other pair a generic path in Chromium produces the tier, so it '
+    + 'says nothing about the model. These are the ones that do. Click a row to load it into the '
+    + 'bench.</p><table>'
+    + '<tr><th>cores / tier</th><th>what it implies</th></tr>';
+  for (const p of pairs) {
+    const who = p.families.map(f => {
+      const ruled = f.needsAppleGpu && GPU.ok && !GPU.apple;
+      return ruled ? `<s>${esc(f.who)}</s>` : esc(f.who);
+    }).join(' &nbsp;·&nbsp; ');
+    const alive = p.families.filter(f => !(f.needsAppleGpu && GPU.ok && !GPU.apple));
+    const tail = alive.length === 1 && alive.length < p.families.length
+      ? ' <span class="note">— one family left once the renderer rules out Apple</span>'
+      : (p.families.length === 1 ? ' <span class="note">— single family</span>' : '');
+    html += `<tr class="clickable" data-c="${p.cores}" data-t="${p.tier}">`
+      + `<td class="pair">${p.cores} / ${p.tier}</td><td>${who}${tail}</td></tr>`;
+  }
+  html += '</table>';
+  host.innerHTML = html;
+  host.hidden = false;
+}
+
+function render(cores, tier, exposed, simulated) {
+  const v = document.getElementById('verdict');
+  document.getElementById('out').innerHTML = '';
+
+  row('hardwareConcurrency', `<code>${esc(cores)}</code> logical processors`
+    + (simulated ? ' <span class="note">— simulated</span>' : ''));
+  row('cpuPerformance', exposed
+    ? `<code>${esc(tier)}</code> (${esc(NAMES[tier] ?? '?')})`
+      + (simulated ? ' <span class="note">— simulated</span>' : '')
+    : '<span class="note">absent — Chromium &lt; 152, insecure context, or feature disabled</span>');
+
+  if (!CHROMIUM && !simulated) {
+    v.className = 'info';
+    v.textContent = 'Only supported on Chromium-based browsers';
+    row('conclusion', '<span class="note">This page reproduces the tier rules of '
+      + '<code>content/browser/cpu_performance/cpu_performance.cc</code>, and '
+      + '<code>navigator.cpuPerformance</code> is a Chromium API. Firefox, Safari and anything '
+      + 'not built on Chromium neither expose it nor compute a tier, so there is nothing to '
+      + 'cross-check and no claim is made here.</span>');
+    return;
+  }
+
+  const major = chromiumVersion();
+  let versionIssue = null, versionHeadline = null;
+  if (major) {
+    row('claimed Chromium version', `<code>${major}</code>`);
+    if (major >= CHROME_MIN_CPU_PERF && !exposed) {
+      versionHeadline = `You don't support the cpuPerformance API but you're on Chrome ${major} — weird`;
+      versionIssue = `Every Chromium from ${CHROME_MIN_CPU_PERF} on ships `
+        + `<code>navigator.cpuPerformance</code>. This browser claims to be `
+        + `${major} and does not have the attribute at all.`;
+    } else if (major < CHROME_MIN_CPU_PERF && exposed) {
+      versionHeadline = `You support the cpuPerformance API but you're on Chrome ${major}, `
+        + `which shipped before it existed — weird`;
+      versionIssue = `<code>navigator.cpuPerformance</code> first shipped in Chromium `
+        + `${CHROME_MIN_CPU_PERF}. This browser claims to be ${major} and exposes it anyway, `
+        + `so the version string is understated.`;
+    }
+  }
+  if (versionIssue && !simulated) {
+    if (!exposed && !SECURE) {
+      v.className = 'info';
+      v.textContent = 'Inconclusive — insecure context, the API is hidden here';
+      row('conclusion', '<span class="note">The attribute is <code>[SecureContext]</code>, so it '
+        + 'is absent over plain http:// regardless of version. Load this page over https or '
+        + 'from localhost to make the version cross-check meaningful.</span>');
+      return;
+    }
+    v.className = 'bad';
+    v.textContent = versionHeadline;
+    const d = document.createElement('div');
+    d.innerHTML = versionIssue
+      + '<div class="note">Whether the attribute exists depends on neither the hardware, nor '
+      + 'the OS, nor any enterprise policy: it is decided by the IDL compiled into the binary '
+      + '(<code>RuntimeEnabled=CpuPerformance</code>). The only legitimate excuse is an '
+      + 'insecure context, and this page is served over a secure one, so that excuse does not '
+      + 'apply. The version string is therefore not the version of the engine running this '
+      + 'page.</div>';
+    row('conclusion', d);
+    return;
+  }
+
+  if (!Number.isInteger(cores) || cores < 1) {
+    v.className = 'info';
+    v.textContent = 'Inconclusive — hardwareConcurrency is not an integer ≥ 1';
+    row('conclusion', '<span class="note">Chromium never produces this value. It comes from an '
+      + 'override (extension, DevTools, third-party browser) that this page does not model, '
+      + 'so nothing is concluded.</span>');
+    return;
+  }
+  if (exposed && (!Number.isInteger(tier) || tier < 0 || tier > 4)) {
+    v.className = 'info';
+    v.textContent = 'Inconclusive — cpuPerformance outside the 0–4 range';
+    row('conclusion', '<span class="note">The API is only defined from 0 to 4 '
+      + '(<code>TierFromInt</code> CHECKs it browser-side). Any other value means this page’s '
+      + 'model does not apply.</span>');
+    return;
+  }
+
+  if (!exposed) {
+    v.className = 'info';
+    v.textContent = 'Inconclusive — cpuPerformance is not exposed here';
+    row('conclusion', '<span class="note">Without the tier there is nothing to cross-check. '
+      + 'The API needs a secure context (https) and Chromium 152 or newer.</span>');
+    return;
+  }
+  if (tier === 0) {
+    v.className = 'info';
+    v.textContent = 'Inconclusive — the browser answers "unknown"';
+    row('conclusion', '<span class="note">Chromium only returns 0 when the processor count is '
+      + 'unknown to it. No cross-check is possible.</span>');
+    return;
+  }
+
+  const reachable = analyse(cores);
+  const coherent = reachable.has(tier);
+
+  if (!coherent) {
+    v.className = 'bad';
+    v.textContent = `Lying — ${cores} processors cannot produce tier ${tier}`;
+    const d = document.createElement('div');
+    d.innerHTML = 'No path in Chromium produces this pair. Possible tiers for '
+      + `<code>${esc(cores)}</code> processors: <code>${[...reachable.keys()].sort().join(', ')}</code>. `
+      + 'So either the reported core count is fake, or the tier is.'
+      + '<div class="note">One caveat: the enterprise policy '
+      + '<code>CpuPerformanceTierOverride</code> pins the tier without looking at the CPU, so on '
+      + 'a managed machine any pair is legitimate. Likewise '
+      + '<code>Emulation.setHardwareConcurrencyOverride</code> (DevTools or CDP) changes the core '
+      + 'count without touching the tier.</div>';
+    row('conclusion', d);
+    return;
+  }
+
+  const reasons = reachable.get(tier);
+  const families = reasons.filter(r => typeof r !== 'string');
+  const generic = reasons.some(r => typeof r === 'string');
+  const otherTiers = [...reachable.keys()].filter(t => t !== tier);
+
+  const byException = families.length > 0 && !generic;
+  v.className = byException ? 'warn' : 'ok';
+  v.textContent = byException
+    ? `Exception or lying hardwareConcurrency — ${cores} processors and tier ${tier} only `
+      + `exist together on ${families.length === 1 ? 'one specific CPU family' : families.length + ' specific CPU families'}`
+    : `Coherent — ${cores} processors and tier ${tier} go together`;
+
+  const list = (fams) => {
+    const ul = document.createElement('ul');
+    for (const f of fams) {
+      const li = document.createElement('li');
+      let extra = '';
+      if (f.needsAppleGpu && GPU.ok && !GPU.apple) {
+        extra = '<div class="note"><b>Unlikely here: no Apple WebGL renderer.</b> '
+          + 'Apple silicon has no discrete GPU, so an Apple M machine always names Apple in '
+          + `<code>UNMASKED_RENDERER_WEBGL</code>. This one reports <code>${esc(GPU.text)}</code>.`
+          + '</div>';
+      } else if (f.needsAppleGpu && !GPU.ok) {
+        extra = `<div class="note">Cannot be checked against the GPU here (${esc(GPU.why)}).</div>`;
+      }
+      const detail = f.perCount && f.perCount[cores]
+        ? `<div class="note">${f.perCount[cores]}</div>` : '';
+      li.innerHTML = `<b>${f.who}</b><div class="note">${f.examples}</div>` + detail + extra;
+      ul.appendChild(li);
+    }
+    return ul;
+  };
+
+  if (families.some(f => f.needsAppleGpu)) {
+    row('WebGL2 renderer', GPU.ok
+      ? `<code>${esc(GPU.text)}</code>`
+      : `<span class="note">unavailable (${esc(GPU.why)})`
+        + (GPU.text ? ` — <code>${esc(GPU.text)}</code>` : '') + '</span>');
+  }
+
+  if (byException) {
+    const d = document.createElement('div');
+    d.innerHTML = '<b>This pair is restrictive.</b> Only these families produce it:';
+    d.appendChild(list(families));
+    const ruledOut = families.filter(f => f.needsAppleGpu && GPU.ok && !GPU.apple);
+    const left = families.filter(f => !ruledOut.includes(f));
+    if (ruledOut.length && left.length === 1) {
+      d.insertAdjacentHTML('beforeend', '<div class="note">With the Apple family ruled out by '
+        + 'the renderer, <b>one family is left</b>: ' + esc(left[0].who) + '. This pair plus the '
+        + 'GPU string therefore pins the CPU family exactly.</div>');
+    } else if (ruledOut.length && left.length) {
+      d.insertAdjacentHTML('beforeend', `<div class="note">With the Apple family ruled out by the `
+        + `renderer, ${left.length} families are left.</div>`);
+    }
+    d.insertAdjacentHTML('beforeend', '<div class="note">A page reading this pair therefore '
+      + 'learns the CPU family, with no permission and no timing measurement.</div>');
+    row('what it says about the machine', d);
+  } else if (families.length) {
+    const d = document.createElement('div');
+    d.innerHTML = 'The tier is the generic one for this processor count, so it says almost '
+      + 'nothing. It would still be compatible with:';
+    d.appendChild(list(families));
+    row('what it says about the machine', d);
+  } else {
+    row('what it says about the machine',
+      '<span class="note">Generic tier for this processor count: no particular family is '
+      + 'implicated, the information is weak.</span>');
+  }
+
+  if (otherTiers.length) {
+    row('other possible tiers',
+      `<code>${otherTiers.sort().join(', ')}</code> <span class="note">— other CPUs with `
+      + `${esc(cores)} logical processors would produce them. The observed tier is therefore not `
+      + `derivable from the core count alone.</span>`);
+  }
+
+  if (cores >= 5 && cores % 2 === 1) {
+    row('odd processor count',
+      `<span class="note"><code>${esc(cores)}</code> is odd. Mainstream x86 parts land on even `
+      + 'counts: with SMT the count doubles, and without it the core count is itself even on '
+      + 'every current family — Lunar Lake Core Ultra is 8 cores / 8 threads, Meteor Lake-U '
+      + '(Core Ultra 5 115U) is 8 cores / 10 threads. An odd count above 4 usually means a '
+      + 'virtual machine or a cgroup-limited container, where the CPU model name still comes '
+      + 'from the host. That is legitimate, and it is why this page does not treat the count '
+      + 'as impossible.</span>');
+  }
+
+  if (cores === 11 || cores === 12) {
+    row('note', '<span class="note">At 11 and 12 processors Chromium’s two passes disagree '
+      + '(synchronous: 3, by model: 4). Both values are legitimate, and which one a page '
+      + 'observes depends on when it looks.</span>');
+  }
+}
+
+(function () {
+  const realCores = navigator.hardwareConcurrency;
+  const exposed = 'cpuPerformance' in navigator;
+  const realTier = exposed ? navigator.cpuPerformance : 0;
+
+  const sc = document.getElementById('sc'), sp = document.getElementById('sp');
+  const oc = document.getElementById('oc'), op = document.getElementById('op');
+  const bench = document.getElementById('bench'), state = document.getElementById('state');
+
+  const clamp = (x, lo, hi, def) =>
+    Number.isFinite(x) ? Math.min(hi, Math.max(lo, Math.round(x))) : def;
+  sc.value = clamp(realCores, 1, 64, 8);
+  sp.value = clamp(realTier, 0, 4, 0);
+
+  let simulated = false;
+
+  function update() {
+    const c = simulated ? +sc.value : realCores;
+    const t = simulated ? +sp.value : realTier;
+    oc.textContent = sc.value + (simulated ? '' : '  (real)');
+    op.textContent = sp.value + ' · ' + (NAMES[sp.value] || '?') + (simulated ? '' : '  (real)');
+    bench.classList.toggle('simulated', simulated);
+    state.textContent = simulated
+      ? `— simulated values (real: ${realCores} / ${exposed ? realTier : 'absent'})`
+      : '— this browser’s real values';
+    render(c, t, exposed || simulated, simulated);
+  }
+
+  const panneau = document.getElementById('presets');
+  fillPresets(panneau, function (c, t) {
+    sc.value = c; sp.value = t; simulated = true; update();
+  });
+
+  const bouton = document.getElementById('show');
+  bouton.addEventListener('click', function () {
+    const host = document.getElementById('discriminating');
+    if (!host.hidden) { host.hidden = true; bouton.classList.remove('open');
+      bouton.innerHTML = '<span>Show discriminating pairs</span>'; return; }
+    renderDiscriminating();
+    bouton.classList.add('open');
+    bouton.innerHTML = '<span>Hide discriminating pairs</span>';
+    host.querySelectorAll('tr.clickable').forEach(function (tr) {
+      tr.addEventListener('click', function () {
+        sc.value = tr.dataset.c; sp.value = tr.dataset.t;
+        simulated = true; update();
+        document.getElementById('verdict').scrollIntoView({ block: 'nearest' });
+      });
+    });
+  });
+
+  const moved = () => { simulated = true; update(); };
+  sc.addEventListener('input', moved);
+  sp.addEventListener('input', moved);
+  document.getElementById('real').addEventListener('click', function () {
+    simulated = false;
+    panneau.querySelectorAll('.item.on').forEach(x => x.classList.remove('on'));
+    sc.value = clamp(realCores, 1, 64, 8);
+    sp.value = clamp(realTier, 0, 4, 0);
+    update();
+  });
+  update();
+})();
+</script>
