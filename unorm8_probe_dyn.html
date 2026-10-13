@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WebGL UNORM8 conversion probe</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
+    body { max-width: 72rem; margin: 2rem auto; padding: 0 1rem 3rem; }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    p { max-width: 66rem; color: color-mix(in srgb, currentColor 72%, transparent); }
+    button { padding: .55rem .85rem; cursor: pointer; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(20rem,1fr)); gap: 1rem; margin: 1rem 0; }
+    section { border: 1px solid color-mix(in srgb,currentColor 20%,transparent); border-radius: .65rem; padding: 1rem; }
+    h2 { font-size: 1rem; margin: 0 0 .65rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: 0; }
+    dt { color: color-mix(in srgb,currentColor 65%,transparent); }
+    dd { margin: 0; font-family: ui-monospace,monospace; overflow-wrap: anywhere; }
+    canvas { image-rendering: pixelated; border: 1px solid color-mix(in srgb,currentColor 20%,transparent); display: block; }
+    pre { max-height: 32rem; overflow: auto; padding: 1rem; border-radius: .5rem; background: color-mix(in srgb,currentColor 7%,transparent); }
+    .sig { font-family: ui-monospace,monospace; font-size: 1rem; overflow-wrap: anywhere; }
+    .note { font-size: .8rem; color: color-mix(in srgb,currentColor 55%,transparent); }
+  </style>
+</head>
+<body>
+  <h1>WebGL UNORM8 conversion probe</h1>
+  <p>
+    FP32 values from 64 ULP below to 64 ULP above every 8-bit half-way boundary are rendered
+    through the visible canvas, whose size, tile order and background change on every run.
+    The signature is the SHA-256 of the extracted conversion features (not of the pixels),
+    so it stays identical as long as the GPU converts the same way.
+  </p>
+  <button id="run">Run again</button>
+  <button id="copy">Copy JSON</button>
+  <section style="margin-top:1rem">
+    <h2>UNORM8 feature signature</h2>
+    <div class="sig" id="signature">…</div>
+    <p class="note" id="sig-note"></p>
+  </section>
+  <div class="cards">
+    <section><h2>Implementation</h2><dl id="implementation"></dl></section>
+    <section><h2>Canvas (default framebuffer)</h2><dl id="default-result"></dl></section>
+    <section><h2>Explicit RGBA8 framebuffer</h2><dl id="rgba8-result"></dl></section>
+  </div>
+  <section>
+    <h2>Measurement canvas (random size and content each run)</h2>
+    <canvas id="challenge"></canvas>
+    <p class="note" id="canvas-info"></p>
+  </section>
+  <h2>Raw result</h2>
+  <pre id="raw">Running…</pre>
+
+<script>
+(() => {
+  'use strict';
+  const raw = document.querySelector('#raw');
+  let lastResult = null;
+  let canvas = document.querySelector('#challenge');
+  const WIDTH = 255;
+  const rowOffsets = Array.from({length: 129}, (_, i) => i - 64);
+  const fractionalSamples = [0.001, 0.25, 0.499, 0.5, 0.501, 0.75, 0.999, 1.0];
+  const totalRows = rowOffsets.length + fractionalSamples.length;
+
+  const bitsBuffer = new ArrayBuffer(4);
+  const bitsFloat = new Float32Array(bitsBuffer);
+  const bitsUint = new Uint32Array(bitsBuffer);
+  const bitsOf = v => { bitsFloat[0] = Math.fround(v); return bitsUint[0]; };
+  const floatOf = b => { bitsUint[0] = b >>> 0; return bitsFloat[0]; };
+  const randInt = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
+
+  function makeThresholdTextureData() {
+    const data = new Float32Array(WIDTH * totalRows);
+    const exact = [];
+    for (let n = 0; n < WIDTH; ++n) {
+      const threshold = n + 0.5;
+      const centerBits = bitsOf(threshold / 255);
+      let tie = null;
+      for (let delta = -8; delta <= 8; ++delta) {
+        const candidate = floatOf(centerBits + delta);
+        if (Math.fround(candidate * 255) === threshold) { tie = candidate; break; }
+      }
+      if (tie === null) tie = Math.fround(threshold / 255); else exact.push(n);
+      const tieBits = bitsOf(tie);
+      for (let row = 0; row < rowOffsets.length; ++row) {
+        data[row * WIDTH + n] = floatOf(tieBits + rowOffsets[row]);
+      }
+      for (let row = 0; row < fractionalSamples.length; ++row) {
+        data[(rowOffsets.length + row) * WIDTH + n] = Math.fround((n + fractionalSamples[row]) / 255);
+      }
+    }
+    return {data, exact};
+  }
+
+  function compile(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  }
+
+  function makeProgram(gl) {
+    const vertex = compile(gl, gl.VERTEX_SHADER, `#version 300 es
+      void main() {
+        vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+        gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+      }`);
+    // origin = position of the current tile inside the 255 x totalRows measurement grid
+    const fragment = compile(gl, gl.FRAGMENT_SHADER, `#version 300 es
+      precision highp float;
+      uniform highp sampler2D thresholds;
+      uniform ivec2 origin;
+      out vec4 outputColor;
+      void main() {
+        float value = texelFetch(thresholds, ivec2(gl_FragCoord.xy) + origin, 0).r;
+        outputColor = vec4(value, 0.0, 0.0, 1.0);
+      }`);
+    const program = gl.createProgram();
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+    return program;
+  }
+
+  // Renders the full 255 x totalRows grid through a target of size tileW x tileH,
+  // tile by tile in random order, clearing to a random colour before each tile.
+  function renderTiled(gl, framebuffer, originLoc, tileW, tileH) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    const tiles = [];
+    for (let y = 0; y < totalRows; y += tileH) {
+      for (let x = 0; x < WIDTH; x += tileW) tiles.push([x, y]);
+    }
+    for (let i = tiles.length - 1; i > 0; --i) {
+      const j = randInt(0, i); [tiles[i], tiles[j]] = [tiles[j], tiles[i]];
+    }
+    const pixels = new Uint8Array(WIDTH * totalRows * 4);
+    const tile = new Uint8Array(tileW * tileH * 4);
+    for (const [x, y] of tiles) {
+      const w = Math.min(tileW, WIDTH - x), h = Math.min(tileH, totalRows - y);
+      gl.clearColor(Math.random(), Math.random(), Math.random(), 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.viewport(0, 0, w, h);
+      gl.uniform2i(originLoc, x, y);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, tile);
+      for (let r = 0; r < h; ++r) {
+        pixels.set(tile.subarray(r * w * 4, (r + 1) * w * 4), ((y + r) * WIDTH + x) * 4);
+      }
+    }
+    if (gl.getError() !== gl.NO_ERROR) throw new Error('rendering or readPixels failed');
+    return {pixels, tileCount: tiles.length};
+  }
+
+  function analyze(pixels, exactIndices) {
+    const result = {
+      exactCandidateCount: exactIndices.length,
+      belowCorrect: 0, aboveCorrect: 0,
+      tieDown: 0, tieUp: 0, tieEven: 0, tieOther: 0,
+      belowFailures: [], aboveFailures: [],
+      fixedChannelMismatches: 0
+    };
+    const red = (row, n) => pixels[(row * WIDTH + n) * 4];
+    const rowIndex = offset => rowOffsets.indexOf(offset);
+    const belowRow = rowIndex(-1), tieRow = rowIndex(0), aboveRow = rowIndex(1);
+    const crossingOffsets = [];
+    const exactSet = new Set(exactIndices);
+    for (let n = 0; n < WIDTH; ++n) {
+      for (let row = 0; row < totalRows; ++row) {
+        const o = (row * WIDTH + n) * 4;
+        result.fixedChannelMismatches += pixels[o + 1] !== 0 || pixels[o + 2] !== 0 || pixels[o + 3] !== 255;
+      }
+      const below = red(belowRow, n), above = red(aboveRow, n);
+      result.belowCorrect += below === n;
+      result.aboveCorrect += above === n + 1;
+      if (below !== n) result.belowFailures.push({n, value: below});
+      if (above !== n + 1) result.aboveFailures.push({n, value: above});
+      if (!exactSet.has(n)) continue;
+      const value = red(tieRow, n);
+      result.tieDown += value === n;
+      result.tieUp += value === n + 1;
+      result.tieEven += value === ((n & 1) ? n + 1 : n);
+      result.tieOther += value !== n && value !== n + 1;
+      let crossing = null;
+      for (let row = 0; row < rowOffsets.length; ++row) {
+        if (red(row, n) >= n + 1) { crossing = rowOffsets[row]; break; }
+      }
+      crossingOffsets.push(crossing);
+    }
+    const count = result.exactCandidateCount;
+    result.fractionalResults = {};
+    for (let row = 0; row < fractionalSamples.length; ++row) {
+      const counts = {down: 0, up: 0, other: 0};
+      for (let n = 0; n < WIDTH; ++n) {
+        const value = red(rowOffsets.length + row, n);
+        counts.down += value === n;
+        counts.up += value === n + 1;
+        counts.other += value !== n && value !== n + 1;
+      }
+      result.fractionalResults[String(fractionalSamples[row])] = counts;
+    }
+    const at75 = result.fractionalResults['0.75'], at999 = result.fractionalResults['0.999'];
+    if (at75.down === 255 && at999.down === 255) result.classification = 'truncate toward zero (floor for UNORM)';
+    else if (count && result.tieDown === count) result.classification = 'nearest, exact ties downward';
+    else if (count && result.tieUp === count) result.classification = 'nearest, exact ties upward';
+    else if (count && result.tieEven === count) result.classification = 'nearest, exact ties to even';
+    else result.classification = 'mixed or higher-precision conversion';
+    result.firstUpperValueOffsetHistogram = crossingOffsets.reduce((h, offset) => {
+      const key = offset === null ? 'outside sweep' : String(offset);
+      h[key] = (h[key] || 0) + 1;
+      return h;
+    }, {});
+    return result;
+  }
+
+  // Deterministic JSON: object keys sorted at every level.
+  function canonicalJSON(value) {
+    if (Array.isArray(value)) return '[' + value.map(canonicalJSON).join(',') + ']';
+    if (value && typeof value === 'object') {
+      return '{' + Object.keys(value).sort()
+        .map(k => JSON.stringify(k) + ':' + canonicalJSON(value[k])).join(',') + '}';
+    }
+    return JSON.stringify(value);
+  }
+
+  function sha256Fallback(bytes) {
+    const K = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    ];
+    const state = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    const bitLength = bytes.length * 8;
+    const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+    const padded = new Uint8Array(paddedLength);
+    padded.set(bytes);
+    padded[bytes.length] = 0x80;
+    const view = new DataView(padded.buffer);
+    view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+    view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+    const rot = (v, a) => (v >>> a) | (v << (32 - a));
+    const w = new Uint32Array(64);
+    for (let off = 0; off < paddedLength; off += 64) {
+      for (let i = 0; i < 16; ++i) w[i] = view.getUint32(off + i * 4, false);
+      for (let i = 16; i < 64; ++i) {
+        const x = w[i - 15], y = w[i - 2];
+        w[i] = (w[i - 16] + (rot(x,7)^rot(x,18)^(x>>>3)) + w[i - 7] + (rot(y,17)^rot(y,19)^(y>>>10))) >>> 0;
+      }
+      let [a,b,c,d,e,f,g,h] = state;
+      for (let i = 0; i < 64; ++i) {
+        const t1 = (h + (rot(e,6)^rot(e,11)^rot(e,25)) + ((e&f)^(~e&g)) + K[i] + w[i]) >>> 0;
+        const t2 = ((rot(a,2)^rot(a,13)^rot(a,22)) + ((a&b)^(a&c)^(b&c))) >>> 0;
+        h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+      }
+      [a,b,c,d,e,f,g,h].forEach((v, i) => { state[i] = (state[i] + v) >>> 0; });
+    }
+    return state.map(v => v.toString(16).padStart(8, '0')).join('');
+  }
+
+  async function sha256(bytes) {
+    if (globalThis.crypto?.subtle) {
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      return [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, '0')).join('');
+    }
+    return sha256Fallback(bytes);
+  }
+
+  function showDefinition(id, values) {
+    const root = document.querySelector(id);
+    root.replaceChildren();
+    for (const [key, value] of Object.entries(values)) {
+      const dt = document.createElement('dt'); dt.textContent = key;
+      const dd = document.createElement('dd'); dd.textContent = String(value);
+      root.append(dt, dd);
+    }
+  }
+
+  const summary = a => ({
+    classification: a.classification,
+    ties: `${a.tieDown} down / ${a.tieUp} up / ${a.tieOther} other`,
+    transitionULP: JSON.stringify(a.firstUpperValueOffsetHistogram),
+    at75Percent: JSON.stringify(a.fractionalResults['0.75']),
+    at99_9Percent: JSON.stringify(a.fractionalResults['0.999']),
+    boundaries: `${a.belowCorrect}/255 below, ${a.aboveCorrect}/255 above`
+  });
+
+  async function run() {
+    raw.textContent = 'Running…';
+
+    // Fresh canvas each run (a WebGL canvas can't be resized into a new context reliably),
+    // with a random, smaller size. The measurement is tiled through it.
+    const fresh = document.createElement('canvas');
+    fresh.id = 'challenge';
+    fresh.width = randInt(48, 128);
+    fresh.height = randInt(32, 96);
+    fresh.style.width = `${fresh.width * 2}px`;
+    fresh.style.height = `${fresh.height * 2}px`;
+    canvas.replaceWith(fresh);
+    canvas = fresh;
+
+    const gl = canvas.getContext('webgl2', {
+      alpha: false, antialias: false, depth: false, stencil: false,
+      premultipliedAlpha: false, preserveDrawingBuffer: true
+    });
+    if (!gl) throw new Error('WebGL2 is unavailable');
+    gl.disable(gl.DITHER);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.STENCIL_TEST);
+
+    const {data, exact} = makeThresholdTextureData();
+    const thresholds = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, thresholds);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, WIDTH, totalRows, 0, gl.RED, gl.FLOAT, data);
+
+    const program = makeProgram(gl);
+    gl.useProgram(program);
+    gl.uniform1i(gl.getUniformLocation(program, 'thresholds'), 0);
+    const originLoc = gl.getUniformLocation(program, 'origin');
+
+    // 1) Through the visible canvas (default framebuffer), tiled.
+    const def = renderTiled(gl, null, originLoc, canvas.width, canvas.height);
+
+    // 2) Explicit RGBA8 framebuffer, same tile size as the canvas.
+    const rgba8 = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, rgba8);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const framebuffer = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rgba8, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error('RGBA8 framebuffer is incomplete');
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, thresholds);
+    const fbo = renderTiled(gl, framebuffer, originLoc, canvas.width, canvas.height);
+
+    // Leave random coloured blocks on the visible canvas so it looks different every run.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.SCISSOR_TEST);
+    for (let i = 0; i < 40; ++i) {
+      gl.scissor(randInt(0, canvas.width), randInt(0, canvas.height), randInt(4, 32), randInt(4, 24));
+      gl.clearColor(Math.random(), Math.random(), Math.random(), 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    gl.disable(gl.SCISSOR_TEST);
+
+    const debug = gl.getExtension('WEBGL_debug_renderer_info');
+    const implementation = {
+      userAgent: navigator.userAgent,
+      vendor: gl.getParameter(gl.VENDOR),
+      renderer: gl.getParameter(gl.RENDERER),
+      unmaskedVendor: debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : 'unavailable',
+      unmaskedRenderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : 'unavailable',
+      defaultColorBits: `${gl.getParameter(gl.RED_BITS)}/${gl.getParameter(gl.GREEN_BITS)}/${gl.getParameter(gl.BLUE_BITS)}/${gl.getParameter(gl.ALPHA_BITS)}`
+    };
+
+    const defaultAnalysis = analyze(def.pixels, exact);
+    const rgba8Analysis = analyze(fbo.pixels, exact);
+
+    // Signature = hash of the features only. Nothing canvas-dependent goes in here.
+    const features = {
+      version: 1,
+      fp32TieCandidates: exact,
+      defaultFramebuffer: defaultAnalysis,
+      rgba8Framebuffer: rgba8Analysis
+    };
+    const featureJSON = canonicalJSON(features);
+    const signature = await sha256(new TextEncoder().encode(featureJSON));
+
+    const result = {
+      generatedAt: new Date().toISOString(),
+      signature,
+      implementation,
+      run: {
+        canvasSize: `${canvas.width}x${canvas.height}`,
+        defaultTiles: def.tileCount,
+        rgba8Tiles: fbo.tileCount
+      },
+      features
+    };
+    lastResult = result;
+
+    document.querySelector('#signature').textContent = signature;
+    document.querySelector('#sig-note').textContent =
+      `SHA-256 of canonical JSON of the extracted features (${featureJSON.length} bytes) — independent of canvas size and content.`;
+    document.querySelector('#canvas-info').textContent =
+      `${canvas.width} × ${canvas.height} px this run · ${def.tileCount} tiles in random order`;
+    showDefinition('#implementation', implementation);
+    showDefinition('#default-result', summary(defaultAnalysis));
+    showDefinition('#rgba8-result', summary(rgba8Analysis));
+    raw.textContent = JSON.stringify(result, null, 2);
+    document.title = `${rgba8Analysis.classification} — UNORM8 probe`;
+  }
+
+  document.querySelector('#run').addEventListener('click', () => run().catch(showError));
+  document.querySelector('#copy').addEventListener('click', async () => {
+    if (lastResult) await navigator.clipboard.writeText(JSON.stringify(lastResult, null, 2));
+  });
+  function showError(error) {
+    raw.textContent = `${error.stack || error}`;
+    document.title = 'Probe failed — UNORM8 probe';
+  }
+  run().catch(showError);
+})();
+</script>
+</body>
+</html>
