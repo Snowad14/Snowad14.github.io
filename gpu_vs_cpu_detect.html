@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GPU vs CPU canvas raster detector</title>
+<style>
+  body { font: 14px/1.5 monospace; background:#111; color:#ddd; margin:16px; }
+  #verdict { font-size:20px; font-weight:bold; padding:12px; border-radius:8px; margin:12px 0; }
+  .ok  { background:#0a3; color:#fff; }
+  .bad { background:#a30; color:#fff; }
+  .warn{ background:#a60; color:#fff; }
+  canvas { border:1px solid #333; image-rendering:pixelated; }
+  table { border-collapse:collapse; } td,th{ border:1px solid #333; padding:4px 8px; text-align:left; }
+  .lbl { color:#8cf; }
+</style>
+</head>
+<body>
+<h2>Détecteur CPU vs GPU (raster canvas 2D)</h2>
+<p>Principe : on dessine <b>la même scène</b> sur un canvas <span class="lbl">willReadFrequently:false</span> (chemin GPU si dispo)
+et un canvas <span class="lbl">willReadFrequently:true</span> (software forcé). Si les pixels sont
+<b>identiques</b> ⇒ le « GPU » est en fait retombé en CPU ⇒ rendu software, <b>même si le renderer ment</b>.</p>
+
+<div id="verdict">…</div>
+
+<div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start">
+  <div><div class="lbl">GPU (willReadFrequently:false)</div><canvas id="gpu" width="300" height="300"></canvas></div>
+  <div><div class="lbl">CPU (willReadFrequently:true)</div><canvas id="cpu" width="300" height="300"></canvas></div>
+  <div><div class="lbl">diff ×8 (amplifié)</div><canvas id="diff" width="300" height="300"></canvas></div>
+</div>
+
+<h3>Détails</h3>
+<table id="details"></table>
+
+<script>
+// ---- Scène qui MAXIMISE les différences de rasterisation GPU vs CPU ----
+// (antialiasing de courbes/rotations, gradients radiaux, ombres floues, alpha, sous-pixel)
+function drawScene(ctx, w, h) {
+  ctx.save();
+  ctx.clearRect(0, 0, w, h);
+
+  // fond gradient radial
+  const g = ctx.createRadialGradient(w*0.5, h*0.5, 5, w*0.5, h*0.5, w*0.7);
+  g.addColorStop(0, '#f0c'); g.addColorStop(0.5, '#09f'); g.addColorStop(1, '#0f6');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+
+  // ombre floue (blur = très divergent GPU/CPU)
+  ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 8; ctx.shadowOffsetX = 3.4; ctx.shadowOffsetY = 2.6;
+
+  // arcs semi-transparents à positions sous-pixel + rotation
+  for (let i = 0; i < 24; i++) {
+    ctx.save();
+    ctx.translate(150 + Math.cos(i)*40.3, 150 + Math.sin(i*1.3)*40.7);
+    ctx.rotate(i * 0.37);
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = `hsl(${i*15},90%,55%)`;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 60.5, 22.3, i*0.21, 0, Math.PI*1.7);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // courbes bézier fines
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1; ctx.lineWidth = 1.3; ctx.strokeStyle = '#fff';
+  for (let i = 0; i < 12; i++) {
+    ctx.beginPath();
+    ctx.moveTo(10.5, 10.5 + i*3.1);
+    ctx.bezierCurveTo(90.3, 5.7, 210.9, 295.2, 289.4, 150.6 - i*2.3);
+    ctx.stroke();
+  }
+
+  // texte pivoté avec gradient (le rendu de glyphe AA diverge fort)
+  ctx.translate(150, 150); ctx.rotate(-0.35);
+  ctx.font = 'bold 34px sans-serif';
+  const tg = ctx.createLinearGradient(-120, 0, 120, 0);
+  tg.addColorStop(0, '#fff'); tg.addColorStop(1, '#000');
+  ctx.fillStyle = tg; ctx.textAlign = 'center';
+  ctx.fillText('Rᶜᵃ𝟿nvas❯', 0, 0);
+  ctx.restore();
+}
+
+function getPixels(canvasId, willReadFrequently) {
+  const c = document.getElementById(canvasId);
+  const ctx = c.getContext('2d', { willReadFrequently });
+  drawScene(ctx, c.width, c.height);
+  // forcer le flush + readback (reflète le backend réel : GPU->CPU si accéléré)
+  return { ctx, data: ctx.getImageData(0, 0, c.width, c.height) };
+}
+
+function compare(a, b) {
+  let diffCount = 0, maxDiff = 0, sumDiff = 0;
+  const n = a.length;
+  const diffImg = new Uint8ClampedArray(n);
+  for (let i = 0; i < n; i += 4) {
+    let d = Math.abs(a[i]-b[i]) + Math.abs(a[i+1]-b[i+1]) + Math.abs(a[i+2]-b[i+2]) + Math.abs(a[i+3]-b[i+3]);
+    if (d > 0) { diffCount++; sumDiff += d; if (d > maxDiff) maxDiff = d; }
+    const v = Math.min(255, d*8);
+    diffImg[i]=v; diffImg[i+1]=v; diffImg[i+2]=v; diffImg[i+3]=255;
+  }
+  return { diffCount, maxDiff, sumDiff, diffImg };
+}
+
+async function fnv1a(u8) { // hash rapide 32-bit pour comparer/loguer
+  let h = 0x811c9dc5;
+  for (let i = 0; i < u8.length; i += 997) { h ^= u8[i]; h = (h + ((h<<1)+(h<<4)+(h<<7)+(h<<8)+(h<<24))) >>> 0; }
+  return ('0000000'+h.toString(16)).slice(-8);
+}
+
+function webglRenderer() {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl') ||
+               document.createElement('canvas').getContext('experimental-webgl');
+    if (!gl) return { vendor:'(no webgl)', renderer:'(no webgl)' };
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return {
+      vendor:  ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR),
+      renderer:ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    };
+  } catch(e) { return { vendor:'(err)', renderer:String(e) }; }
+}
+
+(async function run() {
+  const gpu = getPixels('gpu', false);   // chemin GPU (si dispo)
+  const cpu = getPixels('cpu', true);    // software forcé
+  const cmp = compare(gpu.data.data, cpu.data.data);
+
+  // afficher le diff amplifié
+  document.getElementById('diff').getContext('2d')
+    .putImageData(new ImageData(cmp.diffImg, gpu.data.width, gpu.data.height), 0, 0);
+
+  const gpuHash = await fnv1a(gpu.data.data);
+  const cpuHash = await fnv1a(cpu.data.data);
+  const identical = cmp.diffCount === 0;
+  const wg = webglRenderer();
+  const claimsHwGpu = !/swiftshader|software|llvmpipe|(^|\W)(mesa)?\s*softpipe/i.test(wg.renderer) &&
+                       !/(no webgl)/.test(wg.renderer);
+
+  // ---- Verdict ----
+  const v = document.getElementById('verdict');
+  if (identical) {
+    if (claimsHwGpu) {
+      v.className = 'bad';
+      v.textContent = '🚨 MENSONGE DÉTECTÉ : rendu 100% CPU (software) alors que le renderer prétend un GPU (« '
+        + wg.renderer + ' ). Aucun raster GPU réel.';
+    } else {
+      v.className = 'warn';
+      v.textContent = '⚠️ Rendu CPU / software (pixels identiques). Cohérent avec un renderer software ('
+        + wg.renderer + '). Pas de GPU raster.';
+    }
+  } else {
+    v.className = 'ok';
+    v.textContent = '✅ Chemin GPU raster ACTIF (pixels différents : ' + cmp.diffCount
+      + ' px). Le canvas « GPU » ne rasterise pas comme le CPU.';
+  }
+
+  // ---- Détails ----
+  const rows = [
+    ['Verdict pixels', identical ? 'IDENTIQUES ⇒ software/CPU' : 'DIFFÉRENTS ⇒ GPU raster actif'],
+    ['Pixels différents', cmp.diffCount + ' / ' + (gpu.data.width*gpu.data.height)],
+    ['Diff max (somme canaux)', cmp.maxDiff],
+    ['Diff moyenne / px diff', cmp.diffCount ? (cmp.sumDiff/cmp.diffCount).toFixed(2) : '0'],
+    ['Hash canvas GPU (fnv1a)', gpuHash],
+    ['Hash canvas CPU (fnv1a)', cpuHash],
+    ['WebGL VENDOR (déclaré)', wg.vendor],
+    ['WebGL RENDERER (déclaré)', wg.renderer],
+    ['Renderer prétend un GPU HW ?', claimsHwGpu ? 'OUI' : 'non (software/absent)'],
+    ['Incohérence (dit GPU, rend CPU)', (identical && claimsHwGpu) ? '🚨 OUI' : 'non'],
+  ];
+  document.getElementById('details').innerHTML =
+    '<tr><th>Champ</th><th>Valeur</th></tr>' +
+    rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
+
+  // export machine-lisible (pour scraping/harness)
+  window.__gpuDetect = {
+    identical, diffCount: cmp.diffCount, maxDiff: cmp.maxDiff,
+    gpuHash, cpuHash, webglRenderer: wg.renderer, claimsHwGpu,
+    liesAboutGpu: identical && claimsHwGpu,
+    verdict: identical ? 'cpu_software' : 'gpu_raster',
+  };
+  console.log('__gpuDetect', JSON.stringify(window.__gpuDetect));
+})();
+</script>
+</body>
+</html>
